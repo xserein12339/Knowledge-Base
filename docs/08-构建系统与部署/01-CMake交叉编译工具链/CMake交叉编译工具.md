@@ -78,7 +78,7 @@ CMake 内部有两个关键变量来区分环境：
 
 ​	既然默认值相同，要达到触发条件，开发者必须显式地告诉CMake目标系统是什么。这通常通过两种方式实现：
 
-* **方法一：****指定工具链文件**
+* **方法一：**指定工具链文件
 
 ​	在命令行传入 `CMAKE_TOOLCHAIN_FILE`，对应的工具链文件中通过 `set(CMAKE_SYSTEM_NAME Linux)` 、`set(CMAKE_SYSTEM_PROCESSOR arm)   `明确指定目标系统与架构
 
@@ -94,6 +94,118 @@ make
 ```bash
 cmake -DCMAKE_SYSTEM_NAME=Windows ..   # 在 Linux 上构建 Windows 程序
 ```
+
+
+
+## 2.CMake文件设计范式
+
+### 2.1 设计范式：变量与规则
+
+#### 2.1.1 声明目标平台身份  
+
+​	设置运行平台的目标系统与目标处理器。
+
+```cmake
+set(CMAKE_SYSTEM_NAME Linux)        # 目标系统为 Linux[reference:7]
+set(CMAKE_SYSTEM_PROCESSOR arm)     # 目标处理器为 ARM[reference:9]
+```
+
+
+
+#### 2.1.2 **指定交叉编译工具**
+
+​	必须明确指定 C 和 C++ 交叉编译器的路径或名称
+
+```cmake
+# 方式一：直接指定完整路径[reference:12]
+set(CMAKE_C_COMPILER /opt/toolchain/bin/arm-linux-gnueabihf-gcc)
+set(CMAKE_CXX_COMPILER /opt/toolchain/bin/arm-linux-gnueabihf-g++)
+
+# 方式二：指定前缀，让 CMake 在 PATH 中查找[reference:13]
+set(CMAKE_C_COMPILER arm-linux-gnueabihf-gcc)
+set(CMAKE_CXX_COMPILER arm-linux-gnueabihf-g++)
+```
+
+
+
+#### 2.1.3 **设置系统根目录** 
+
+​	设置所有必要的头文件与库文件的目录，避免链接到编译平台的库文件。
+
+```cmake
+set(CMAKE_SYSROOT /opt/toolchain/arm-linux-gnueabihf/sysroot)
+```
+
+
+
+#### 2.1.4 **配置查找模式** 
+
+​	指定头文件与库文件的查找目录，如 `find_package`, `find_library`等，避免错误链接到编译平台的库。
+
+```cmake
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)  # 查找程序时，不搜索 sysroot
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)   # 查找库时，只在 sysroot 中搜索
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)   # 查找头文件时，只在 sysroot 中搜索
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)   # 查找包时，只在 sysroot 中搜索
+```
+
+
+
+### 2.2 实现方法
+
+​	编译链文件本身为一个`.cmake`文件，使用使用流程为：
+
+* **创建文件：**在根目录或者编译专用目录创建`.cmake`文件，例如`toolchain-arm.cmake`文件。
+* **编写文件：**根据设计范式对文件进行编写，实现不同的编译要求。
+* **使用文件：**在编译cmake阶段通过`CMAKE_TOOLCHAIN_FILE`参数指定编译时需要遵循的编译链文件。
+
+```bash
+mkdir build && cd build
+cmake -DCMAKE_TOOLCHAIN_FILE=/path/to/your/toolchain.cmake ..
+make
+```
+
+在指定完对应的编译链文件且编译链文件生效之后，`CMakeLists.txt`文件中的标志命令会根据编译链文件中的要求自动适配为目标平台。
+
+
+
+## 3.关键CMake变量与命令
+
+​	在编译链文件中只能使用变量设置与少量非项目级命令来进行配置，运行使用的变量与命令如下：
+
+| 类别     | 命令/变量                       | 说明                                            |
+| -------- | ------------------------------- | ----------------------------------------------- |
+| 系统标识 | `CMAKE_SYSTEM_NAME`             | 必填。Linux/Generic/Android/iOS/Windows         |
+|          | `CMAKE_SYSTEM_PROCESSOR`        | 目标 CPU 架构 (aarch64, arm, riscv64, x86_64)   |
+|          | `CMAKE_SYSTEM_VERSION`          | 目标系统版本号                                  |
+| 编译器   | `CMAKE_C_COMPILER`              | C 编译器路径或名称                              |
+|          | `CMAKE_CXX_COMPILER`            | C++ 编译器路径或名称                            |
+|          | `CMAKE_ASM_COMPILER`            | 汇编编译器                                      |
+|          | `CMAKE_AR` / `CMAKE_RANLIB`     | 归档与索引工具                                  |
+|          | `CMAKE_LINKER`                  | 链接器 (仅在非默认链接器时需要)                 |
+| 路径控制 | `CMAKE_SYSROOT`                 | 传递给 `--sysroot=` 并作为查找根                |
+|          | `CMAKE_FIND_ROOT_PATH`          | 额外的查找根路径列表                            |
+|          | `CMAKE_FIND_ROOT_PATH_MODE_*`   | PROGRAM/LIBRARY/INCLUDE/PACKAGE 的搜索策略      |
+|          | `CMAKE_STAGING_PREFIX`          | `make install` 时的临时安装前缀                 |
+| 编译控制 | `CMAKE_TRY_COMPILE_TARGET_TYPE` | `STATIC_LIBRARY` (裸机) 或 `EXECUTABLE` (默认)  |
+|          | `CMAKE_C_FLAGS_INIT`            | 初始化 C 标志 (比 `add_compile_options` 更安全) |
+|          | `CMAKE_CXX_FLAGS_INIT`          | 初始化 C++ 标志                                 |
+|          | `add_compile_options()`         | 全局编译选项 (谨慎使用)                         |
+|          | `add_link_options()`            | 全局链接选项 (谨慎使用)                         |
+| 缓存     | `set(... CACHE ...)`            | 使变量可被命令行覆盖或在 GUI 中可见             |
+
+​	不推荐使用的命令：
+
+| 命令                                 | 原因                                                    |
+| ------------------------------------ | ------------------------------------------------------- |
+| `project()`                          | 工具链文件在 project() 之前加载，调用它会破坏初始化顺序 |
+| `add_executable()` / `add_library()` | 工具链文件不定义构建目标                                |
+| `target_*()`                         | 没有目标可供操作                                        |
+| `find_package()` / `find_path()`     | 搜索行为尚未配置完成，结果不可靠                        |
+| `install()`                          | 安装规则属于项目逻辑                                    |
+| `include_directories()`              | 应通过 sysroot 或 target 属性管理                       |
+
+
 
 
 
